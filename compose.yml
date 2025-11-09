@@ -1,0 +1,179 @@
+services:
+  traefik:
+    image: traefik:v3.5
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      # Entry points
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http.tls=true"
+
+      # Static configuration
+      - "--providers.file.filename=/dynamic/tls.yml"
+
+      # Providers
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=proxy"
+
+      # API and Dashboard
+      - "--api.dashboard=true"
+      - "--api.insecure=false"
+
+      # Observability 
+      - "--log.level=DEBUG"
+      - "--accesslog=true"
+      - "--metrics.prometheus=true"
+
+      # Certificates
+      # - "--certificateresolvers.le.acme.email=${ACME_EMAIL}"
+      # - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+      # - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
+
+    labels:
+      - "traefik.enable=true"
+
+      - "traefik.http.routers.traefik.rule=Host(`dashboard.${DOMAIN_NAME:-localhost}`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls=true"
+      - "traefik.http.routers.traefik.service=api@internal"
+
+      # Basic‑auth middleware
+      - "traefik.http.middlewares.dashboard-auth.basicauth.users=admin:$$apr1$$lUZU03Hu$$X5xYLgbiWO0Da3LIEgpPc1"
+      - "traefik.http.routers.dashboard.middlewares=dashboard-auth@docker"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    networks:
+      - proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./certs:/certs:ro
+      - ./dynamic:/dynamic:ro
+      # - "./letsencrypt:/letsencrypt"
+
+
+  backend:
+    container_name: backend
+    build:
+      context: ./EIN103B-PROYECTO-DE-SOFTWARE-BACK
+      dockerfile: ./backend.Dockerfile
+      target: ${DEPLOYMENT_ENV:-development}
+    volumes:
+      - ./EIN103B-PROYECTO-DE-SOFTWARE-BACK/src/:/usr/src/app
+    depends_on:
+      - db
+    secrets: 
+      - db_password
+      - jwt_secret
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_USER: ${POSTGRES_USER:-backend}
+      POSTGRES_DB: ${POSTGRES_DB:-backend}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      
+      DOMAIN_NAME: ${DOMAIN_NAME:-localhost}
+      BACKEND_PATH: ${BACKEND_PATH:-/api/v1}
+    networks:
+      - proxy
+      - backend
+    # ports:
+    #   - 3001:3001
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend.rule=Host(`${DOMAIN_NAME:-localhost}`) && PathPrefix(`${BACKEND_PATH:-/api/v1}`)"
+      - "traefik.http.routers.backend.entrypoints=websecure"
+      - "traefik.http.routers.backend.tls=true"
+
+      # - "traefik.http.routers.backend.tls.certresolver=le"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:3001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  db:
+    image: postgres:17.6
+    restart: always
+    shm_size: 128mb
+    secrets: 
+      - db_password
+    volumes:
+      - db_data:/var/lib/postgresql
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_USER: ${POSTGRES_USER:-backend}
+      POSTGRES_DB: ${POSTGRES_DB:-backend}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+    networks:
+      - backend
+    ports:
+      - 172.0.0.1:${POSTGRES_PORT:-5432}:${POSTGRES_PORT:-5432}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 5s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  frontend:
+    container_name: frontend
+    build:
+      context: ./EIN103B-PROYECTO-DE-SOFTWARE-FRONT
+      dockerfile: ./frontend.Dockerfile
+      target: ${DEPLOYMENT_ENV:-development}
+      args:
+        NEXT_PUBLIC_DOMAIN_NAME: ${DOMAIN_NAME:-localhost}
+        NEXT_PUBLIC_BACKEND_PATH: ${BACKEND_PATH:-/api/v1}
+    volumes:
+      - ./EIN103B-PROYECTO-DE-SOFTWARE-FRONT:/usr/src/app
+      - /usr/src/app/node_modules
+    # ports:
+    #   - 3000:3000
+    environment:
+      NEXT_PUBLIC_DOMAIN_NAME: ${DOMAIN_NAME:-localhost}
+      NEXT_PUBLIC_BACKEND_PATH: ${BACKEND_PATH:-/api/v1}
+    depends_on:
+      - backend
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`${DOMAIN_NAME:-localhost}`)"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+      - "traefik.http.routers.frontend.tls=true"
+
+      # - "traefik.http.routers.frontend.tls.certresolver=le"
+
+      - "traefik.http.services.frontend.loadbalancer.sticky.cookie=true"
+      - "traefik.http.services.frontend.loadbalancer.sticky.cookie.name=sticky_cookie"
+      - "traefik.http.services.frontend.loadbalancer.sticky.cookie.secure=true"
+      - "traefik.http.services.frontend.loadbalancer.sticky.cookie.httpOnly=true"
+
+networks:
+  backend:
+    internal: true
+
+  frontend:
+    driver: bridge
+
+  proxy:
+    name: proxy
+volumes:
+  db_data:
+
+secrets:
+  db_password:
+    file: ./EIN103B-PROYECTO-DE-SOFTWARE-BACK/secrets/db/db_pass.secret
+  jwt_secret:
+    file: ./EIN103B-PROYECTO-DE-SOFTWARE-BACK/secrets/jwt/jwt.secret
