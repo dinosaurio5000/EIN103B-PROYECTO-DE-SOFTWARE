@@ -108,7 +108,7 @@ services:
     secrets: 
       - db_password
     volumes:
-      - db_data:/var/lib/postgresql
+      - pgdata:/var/lib/postgresql/data
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/db_password
       POSTGRES_USER: ${POSTGRES_USER:-backend}
@@ -138,6 +138,7 @@ services:
     volumes:
       - ./EIN103B-PROYECTO-DE-SOFTWARE-FRONT:/usr/src/app
       - /usr/src/app/node_modules
+      - /usr/src/app/.next
     # ports:
     #   - 3000:3000
     environment:
@@ -170,7 +171,7 @@ networks:
   proxy:
     name: proxy
 volumes:
-  db_data:
+  pgdata:
 
 secrets:
   db_password:
